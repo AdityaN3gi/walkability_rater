@@ -10,15 +10,16 @@ import 'package:image_picker/image_picker.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart'; // Local Memory Added
 
 void main() {
   runApp(const WalkabilityApp());
 }
 
-// 1. DATA MODEL  — now stores resolved coords
+// 1. DATA MODEL — Now equipped for JSON translation
 class WalkabilityAudit {
-  final String locationDisplay; // human-readable label shown in UI
-  final LatLng? coords; // resolved coordinates (null = unknown)
+  final String locationDisplay;
+  final LatLng? coords;
   final int rating;
   final String note;
   final String? imagePath;
@@ -30,6 +31,28 @@ class WalkabilityAudit {
     required this.note,
     this.imagePath,
   });
+
+  // Convert Object to JSON text for saving
+  Map<String, dynamic> toJson() => {
+    'locationDisplay': locationDisplay,
+    'lat': coords?.latitude,
+    'lng': coords?.longitude,
+    'rating': rating,
+    'note': note,
+    'imagePath': imagePath,
+  };
+
+  // Convert JSON text back into Object on startup
+  factory WalkabilityAudit.fromJson(Map<String, dynamic> json) =>
+      WalkabilityAudit(
+        locationDisplay: json['locationDisplay'],
+        coords: json['lat'] != null && json['lng'] != null
+            ? LatLng(json['lat'], json['lng'])
+            : null,
+        rating: json['rating'],
+        note: json['note'],
+        imagePath: json['imagePath'],
+      );
 }
 
 /// Returns stored coords if available, otherwise Bengaluru centre.
@@ -55,7 +78,6 @@ String ratingCategory(int rating) {
 }
 
 /// Geocode a plain-text place name via Nominatim.
-/// Returns null if the name cannot be resolved.
 Future<LatLng?> geocodeAddress(String query) async {
   try {
     final uri = Uri.parse(
@@ -78,14 +100,12 @@ Future<LatLng?> geocodeAddress(String query) async {
   return null;
 }
 
-/// A single suggestion returned by the Nominatim autocomplete search.
 class LocationSuggestion {
   final String displayName;
   final LatLng coords;
   LocationSuggestion({required this.displayName, required this.coords});
 }
 
-/// Fetches up to 5 place suggestions from Nominatim for [query].
 Future<List<LocationSuggestion>> fetchSuggestions(String query) async {
   if (query.length < 2) return [];
   try {
@@ -99,7 +119,6 @@ Future<List<LocationSuggestion>> fetchSuggestions(String query) async {
     if (response.statusCode == 200) {
       final List data = json.decode(response.body);
       return data.map((item) {
-        // Shorten the display name: take only the first 2–3 comma-separated parts
         final parts = (item['display_name'] as String).split(', ');
         final short = parts.take(3).join(', ');
         return LocationSuggestion(
@@ -115,7 +134,7 @@ Future<List<LocationSuggestion>> fetchSuggestions(String query) async {
   return [];
 }
 
-//  ROOT APP WIDGET
+// 2. ROOT APP WIDGET
 class WalkabilityApp extends StatelessWidget {
   const WalkabilityApp({super.key});
 
@@ -159,7 +178,7 @@ class WalkabilityApp extends StatelessWidget {
   }
 }
 
-// 3. MAIN SCREEN
+// 3. MAIN SCREEN — Now loaded with Shared Preferences
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -172,11 +191,43 @@ class _MainScreenState extends State<MainScreen> {
   final List<WalkabilityAudit> _audits = [];
   String? _pendingMapFilter;
 
+  @override
+  void initState() {
+    super.initState();
+    _loadData();
+  }
+
+  // Load Data from Hard Drive
+  Future<void> _loadData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? dataString = prefs.getString('audits_data');
+
+    if (dataString != null) {
+      final List<dynamic> jsonList = jsonDecode(dataString);
+      setState(() {
+        _audits.clear();
+        _audits.addAll(
+          jsonList.map((e) => WalkabilityAudit.fromJson(e)).toList(),
+        );
+      });
+    }
+  }
+
+  // Save Data to Hard Drive
+  Future<void> _saveData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String dataString = jsonEncode(
+      _audits.map((e) => e.toJson()).toList(),
+    );
+    await prefs.setString('audits_data', dataString);
+  }
+
   void _addAudit(WalkabilityAudit audit) {
     setState(() {
       _audits.add(audit);
       _currentIndex = 1;
     });
+    _saveData(); // Save immediately when a new audit is created
   }
 
   void _openMapWithFilter(String filter) {
@@ -230,7 +281,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 }
 
-// 4. AUDIT FORM  — geocodes manual text on save
+// 4. AUDIT FORM
 class AuditForm extends StatefulWidget {
   final Function(WalkabilityAudit) onSubmit;
   const AuditForm({super.key, required this.onSubmit});
@@ -248,7 +299,6 @@ class _AuditFormState extends State<AuditForm> {
   XFile? _selectedImage;
   final ImagePicker _picker = ImagePicker();
 
-  // Autocomplete state
   List<LocationSuggestion> _suggestions = [];
   bool _loadingSuggestions = false;
   bool _showSuggestions = false;
@@ -263,7 +313,6 @@ class _AuditFormState extends State<AuditForm> {
   }
 
   void _onLocationChanged(String value) {
-    // Clear any previously resolved coords when user types
     setState(() {
       _resolvedCoords = null;
       _showSuggestions = value.length >= 2;
@@ -347,7 +396,6 @@ class _AuditFormState extends State<AuditForm> {
         ? 'Unknown Location'
         : _locationController.text.trim();
 
-    // Warn if the user typed but never picked a suggestion
     if (_resolvedCoords == null &&
         locationText != 'Unknown Location' &&
         !locationText.startsWith('GPS:') &&
@@ -402,7 +450,6 @@ class _AuditFormState extends State<AuditForm> {
             ),
           ),
           const SizedBox(height: 8),
-          // ── LOCATION INPUT + SUGGESTION DROPDOWN ──
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -437,7 +484,6 @@ class _AuditFormState extends State<AuditForm> {
                             : null,
                       ),
                     ),
-                    // Suggestion dropdown
                     if (_showSuggestions && _suggestions.isNotEmpty)
                       Container(
                         margin: const EdgeInsets.only(top: 2),
@@ -489,7 +535,6 @@ class _AuditFormState extends State<AuditForm> {
                           }).toList(),
                         ),
                       ),
-                    // Nudge if user typed but hasn't picked
                     if (_showSuggestions &&
                         _suggestions.isEmpty &&
                         !_loadingSuggestions &&
@@ -664,7 +709,7 @@ class _AuditFormState extends State<AuditForm> {
   }
 }
 
-// DASHBOARD
+// 5. DASHBOARD
 class Dashboard extends StatefulWidget {
   final List<WalkabilityAudit> audits;
   final void Function(String filter) onFilterTap;
@@ -860,8 +905,7 @@ class _DashboardState extends State<Dashboard> {
   }
 }
 
-//  MAP SCREEN
-
+// 6. MAP SCREEN
 class MapScreen extends StatefulWidget {
   final List<WalkabilityAudit> audits;
   final String initialFilter;
@@ -928,7 +972,6 @@ class _MapScreenState extends State<MapScreen> {
 
     return Column(
       children: [
-        // Filter chips
         Container(
           color: const Color(0xFF121212),
           padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
@@ -965,8 +1008,6 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ),
         ),
-
-        // Map
         Expanded(
           child: widget.audits.isEmpty
               ? const Center(
@@ -1047,8 +1088,6 @@ class _MapScreenState extends State<MapScreen> {
                   ],
                 ),
         ),
-
-        // Count bar
         if (widget.audits.isNotEmpty)
           Container(
             color: const Color(0xFF121212),
@@ -1105,7 +1144,7 @@ class _TrianglePainter extends CustomPainter {
   bool shouldRepaint(_TrianglePainter old) => old.color != color;
 }
 
-// AUDIT DETAIL SCREEN — fluid collapsing map
+// 7. AUDIT DETAIL SCREEN
 class AuditDetailScreen extends StatelessWidget {
   final WalkabilityAudit audit;
   const AuditDetailScreen({super.key, required this.audit});
@@ -1118,26 +1157,22 @@ class AuditDetailScreen extends StatelessWidget {
 
     return Scaffold(
       backgroundColor: const Color(0xFF121212),
-      // No appBar here — the SliverAppBar inside replaces it
       body: CustomScrollView(
         slivers: [
-          // ── COLLAPSING MAP HEADER ──
           SliverAppBar(
             backgroundColor: const Color(0xFF121212),
             foregroundColor: Colors.white,
             expandedHeight: 320,
-            pinned: true, // keeps the bar visible when collapsed
+            pinned: true,
             snap: false,
             floating: false,
             flexibleSpace: FlexibleSpaceBar(
-              // Title shown when collapsed
               title: Text(
                 audit.locationDisplay,
                 style: const TextStyle(fontSize: 13, color: Colors.white),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              // The map fills the expanded area
               background: Stack(
                 children: [
                   FlutterMap(
@@ -1167,7 +1202,6 @@ class AuditDetailScreen extends StatelessWidget {
                       ),
                     ],
                   ),
-                  // Warning banner if coords were not resolved
                   if (!hasRealCoords)
                     Positioned(
                       bottom: 0,
@@ -1204,20 +1238,16 @@ class AuditDetailScreen extends StatelessWidget {
               ),
             ),
           ),
-
-          // ── SCROLLABLE CONTENT ──
           SliverToBoxAdapter(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Optional photo
                 if (audit.imagePath != null)
                   Image.file(
                     File(audit.imagePath!),
                     height: 220,
                     fit: BoxFit.cover,
                   ),
-
                 Padding(
                   padding: const EdgeInsets.all(20.0),
                   child: Column(
